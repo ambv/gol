@@ -53,10 +53,10 @@ def main() -> None:
     init()
     # Draw the Clifford attractor
     clifford_attractor(
-        a=-1.4,
+        a=1.7,
         b=1.7,
-        c=1,
-        d=0.7,
+        c=0.6,
+        d=1.2,
         iterations=50000,
         scale=220,
     )
