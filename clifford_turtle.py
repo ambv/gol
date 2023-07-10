@@ -58,7 +58,7 @@ def main() -> None:
         c=1,
         d=0.7,
         iterations=50000,
-        scale=200,
+        scale=220,
     )
     turtle.update()
     turtle.done()
