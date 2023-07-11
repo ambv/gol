@@ -93,6 +93,10 @@ function animate() {
   // Rotate lights, too
   
   controls.update();
+
+  camera.position.x = camera.position.x + Math.sin(Date.now() * 0.0001) * 1;
+  camera.position.z = camera.position.z + Math.cos(Date.now() * 0.0001) * 1;
+
   lightBackGreen.position.x = camera.position.x;
   lightBackGreen.position.y = camera.position.y;
   lightBackGreen.position.z = camera.position.z;
