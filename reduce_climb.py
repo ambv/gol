@@ -1,7 +1,11 @@
-import functools
+import asyncio
+import concurrent.futures
+from contextvars import ContextVar
+from dataclasses import dataclass
+import os
 import random
-from typing import Callable
 
+import click
 import numpy as np
 from PIL import Image, ImageDraw
 from rich.progress import Progress
@@ -13,11 +17,21 @@ Triangle = tuple[Point, Point, Point]
 RGB = tuple[int, int, int]
 
 
+@dataclass
+class ColorTriangle:
+    color: RGB
+    triangle: Triangle
+    difference: int
+
+
 console = Console()
 print = console.print
+CPU_COUNT: int = os.cpu_count() or 2
+INPUT_IMG: ContextVar[Image.Image] = ContextVar("input_image")
+OUTPUT_IMG: ContextVar[Image.Image] = ContextVar("output_image")
 
 
-def calculate_difference(image1: Image.Image, image2: Image.Image):
+def calculate_difference(image1: Image.Image, image2: Image.Image) -> int:
     """Calculate the difference between two images."""
     diff = np.array(image1) - np.array(image2)
     squared_diff = np.square(diff)
@@ -76,23 +90,30 @@ def apply_triangle(image: Image.Image, triangle: Triangle, color: RGB) -> Image.
 
 
 def choose_next_triangle(
-    input_image: Image.Image,
-    output_image: Image.Image,
-    attempts: int = 1000,
-    callback: Callable[[], None] = lambda: None,
-) -> Image.Image:
+    current_difference: int,
+    last_triangle: ColorTriangle | None,
+    attempts: int,
+) -> ColorTriangle:
+    input_image = INPUT_IMG.get()
+    output_image = OUTPUT_IMG.get()
     width, height = input_image.size
 
     # Calculate the difference between the input and the output image
+    if last_triangle is not None:
+        output_image = apply_triangle(
+            output_image, last_triangle.triangle, last_triangle.color
+        )
+        OUTPUT_IMG.set(output_image)
+
     smallest_difference = calculate_difference(input_image, output_image)
+    assert smallest_difference == current_difference, "Workers out of sync with manager"
+
     best_triangle = None
-    best_image = None
+    best_color = None
 
     iterations = 0
     while smallest_difference > 0 and iterations < attempts:
         iterations += 1
-        callback()
-
         candidate_triangle = generate_candidate_triangle(
             width, height, mutate=best_triangle
         )
@@ -100,64 +121,107 @@ def choose_next_triangle(
         new_output_image = apply_triangle(
             output_image, candidate_triangle, candidate_color
         )
-
         new_difference = calculate_difference(input_image, new_output_image)
-
         if new_difference < smallest_difference:
             smallest_difference = new_difference
             best_triangle = candidate_triangle
-            best_image = new_output_image
-            print(
-                f"  Difference improved to {smallest_difference}"
-                f" at iteration {iterations}"
-            )
+            best_color = candidate_color
 
-    if best_image is not None:
-        return best_image
+    if best_triangle is not None and best_color is not None:
+        return ColorTriangle(
+            color=best_color, triangle=best_triangle, difference=smallest_difference
+        )
 
     raise LookupError(f"Couldn't improve the score in {attempts} iterations")
 
 
-def reduce_image_to_output(
+def init_images(input_path: str) -> None:
+    input_image = Image.open(input_path)
+    width, height = input_image.size
+    average_color: RGB = input_image.resize((1, 1), resample=Image.LANCZOS).getpixel((0, 0))  # type: ignore
+    output_image = Image.new("RGB", (width, height), average_color)
+    INPUT_IMG.set(input_image)
+    OUTPUT_IMG.set(output_image)
+
+
+async def reduce_image_to_output(
     input_path: str,
     output_path: str,
     num_triangles: int = 500,
     attempts_per_triangle: int = 1000,
 ) -> None:
-    # Load the input image
-    input_image = Image.open(input_path)
-    width, height = input_image.size
+    init_images(input_path)
+    triangles: list[ColorTriangle] = []
+    loop = asyncio.get_running_loop()
 
-    # Create the output image with the average color of the input as the background
-    average_color = input_image.resize((1, 1), resample=Image.LANCZOS).getpixel((0, 0))
-    output_image = Image.new("RGB", (width, height), average_color)
+    input_image = INPUT_IMG.get()
+    output_image = OUTPUT_IMG.get()
+    current_difference = calculate_difference(input_image, output_image)
 
-    candidate_images = [output_image]
-    # Hill-climbing algorithm to improve the output image
-    with Progress(console=console) as progress:
-        task_id = progress.add_task(
-            "Generating...", total=num_triangles * attempts_per_triangle
-        )
-        update = functools.partial(progress.update, task_id, advance=1)
-        while len(candidate_images) < num_triangles:
-            print(f"{len(candidate_images)} triangles so far...")
-            try:
-                candidate_images.append(
-                    choose_next_triangle(
-                        input_image,
-                        candidate_images[-1],
-                        attempts=attempts_per_triangle,
-                        callback=update,
-                    )
+    with (
+        concurrent.futures.ProcessPoolExecutor(
+            initializer=init_images,
+            initargs=(input_path,),
+            max_workers=CPU_COUNT,
+        ) as pool,
+        Progress(console=console, auto_refresh=False) as progress,
+    ):
+        task_id = progress.add_task("Generating...", total=num_triangles)
+        while len(triangles) < num_triangles:
+            print(f"{len(triangles)} triangles so far...")
+            last_triangle = triangles[-1] if triangles else None
+            attempts = [
+                loop.run_in_executor(
+                    pool,
+                    choose_next_triangle,
+                    current_difference,
+                    last_triangle,
+                    attempts_per_triangle,
                 )
-            except LookupError:
-                break  # we can't improve anymore
+                for _ in range(CPU_COUNT)
+            ]
+
+            triangle: ColorTriangle | None = None
+            for attempt in asyncio.as_completed(attempts):
+                try:
+                    candidate = await attempt
+                    if triangle is None or triangle.difference > candidate.difference:
+                        triangle = candidate
+                except LookupError:
+                    print("  One worker didn't find anything")
+                    continue
+            if triangle is None:
+                print("  No candidates in this round")
+                break
+
+            triangles.append(triangle)
+            current_difference = triangle.difference
+            print(f"  Difference improved to {current_difference}")
+            progress.update(task_id, advance=1)
 
     # Save the final output image
-    output_image = candidate_images[-1]
+    for t in triangles:
+        apply_triangle(output_image, t.triangle, t.color)
     output_image.save(output_path)
     print(f"Output image saved to {output_path}")
 
 
+@click.command()
+@click.argument("input_path")
+@click.argument("output_path")
+def diff_images(input_path: str, output_path: str) -> None:
+    input_image = Image.open(input_path)
+    output_image = Image.open(output_path)
+    print(calculate_difference(input_image, output_image))
+
+
+@click.command()
+@click.argument("input_path")
+@click.argument("output_path")
+def reduce_main(input_path: str, output_path: str) -> None:
+    asyncio.run(reduce_image_to_output(input_path, output_path))
+
+
 if __name__ == "__main__":
-    reduce_image_to_output("input.jpg", "output_image8.jpg")
+    reduce_main()
+    # diff_images()
