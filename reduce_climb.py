@@ -54,11 +54,15 @@ def calculate_difference(image1: Image.Image, image2: Image.Image) -> int:
 
 
 def generate_candidate_triangle(
-    max_x: int, max_y: int, mutate: Triangle | None = None, min_area: float = 0.0
+    max_x: int,
+    max_y: int,
+    min_area: float,
+    max_area: float,
+    mutate: Triangle | None = None,
 ) -> Triangle:
     area = -1.0
     triangle = None
-    while area < min_area or triangle is None:
+    while triangle is None or area < min_area or max_area < area:
         triangle = _generate_candidate_triangle(max_x, max_y, mutate)
         area = calculate_triangle_area(triangle)
     return triangle
@@ -122,6 +126,7 @@ def choose_next_triangle(
     last_triangle: ColorTriangle | None,
     attempts: int,
     min_area: float,
+    max_area: float,
     progress_dict: ProgressDict,
     task_id: TaskID,
 ) -> ColorTriangle:
@@ -147,7 +152,7 @@ def choose_next_triangle(
     while iterations < attempts:
         iterations += 1
         candidate_triangle = generate_candidate_triangle(
-            width, height, mutate=best_triangle, min_area=min_area
+            width, height, mutate=best_triangle, min_area=min_area, max_area=max_area
         )
         candidate_color = get_average_color(input_image, candidate_triangle)
         new_output_image = apply_triangle(
@@ -209,7 +214,7 @@ async def reduce_image_to_output(
     num_triangles: int = 500,
     attempts_per_triangle: int = 1000,
     max_retries: int = 3,
-    min_area_pct: float = 0.01,
+    min_area_pct: float = 0.025,
 ) -> None:
     init_images(input_path)
     triangles: list[ColorTriangle] = []
@@ -245,7 +250,13 @@ async def reduce_image_to_output(
         while len(triangles) < num_triangles and retries < max_retries:
             last_triangle = triangles[-1] if triangles and retries == 0 else None
             percentage = len(triangles) / num_triangles
-            min_area = min_area_pct * (image_area - percentage * image_area)
+            min_area = max(
+                0, min_area_pct * (image_area - 10 * percentage * image_area)
+            )
+            max_area = max(
+                min_area_pct * image_area,
+                image_area * min_area_pct + image_area * (0.5 - percentage),
+            )
             attempts = [
                 loop.run_in_executor(
                     pool,
@@ -254,6 +265,7 @@ async def reduce_image_to_output(
                     last_triangle,
                     attempts_per_triangle,
                     min_area,
+                    max_area,
                     _progress,
                     _tasks[i],
                 )
@@ -262,6 +274,8 @@ async def reduce_image_to_output(
 
             async def monitor() -> None:
                 base = len(triangles) * CPU_COUNT * attempts_per_triangle
+                for task_id in _progress:
+                    progress.reset(task_id)
                 while True:
                     await asyncio.sleep(0.1)
                     current = 0
@@ -311,7 +325,7 @@ async def reduce_image_to_output(
             if empty:
                 maybe_empty = f" with {empty} empty results"
             print(
-                f"  Difference improved to {current_difference}"
+                f"{len(triangles):03}: Difference improved to {current_difference}"
                 f" (delta {delta_difference}) {maybe_empty}"
             )
             p = path_with_index(output_path, len(triangles))
