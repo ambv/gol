@@ -6,7 +6,7 @@ import multiprocessing
 from pathlib import Path
 import os
 import random
-from typing import cast
+from typing import cast, TypeVar
 
 import click
 import numpy as np
@@ -18,6 +18,7 @@ from rich.console import Console
 Point = tuple[int, int]
 Triangle = tuple[Point, Point, Point]
 RGB = tuple[int, int, int]
+Num = TypeVar('Num', int, float)
 
 
 @dataclass
@@ -46,6 +47,10 @@ INPUT_IMG: ContextVar[Image.Image] = ContextVar("input_image")
 OUTPUT_IMG: ContextVar[Image.Image] = ContextVar("output_image")
 
 
+def clamp(num: Num, minimum: Num, maximum: Num) -> Num:
+    return min(maximum, max(minimum, num))
+
+
 def calculate_difference(image1: Image.Image, image2: Image.Image) -> int:
     """Calculate the difference between two images."""
     diff = np.array(image1) - np.array(image2)
@@ -56,35 +61,31 @@ def calculate_difference(image1: Image.Image, image2: Image.Image) -> int:
 def generate_candidate_triangle(
     max_x: int,
     max_y: int,
-    min_area: float,
-    max_area: float,
-    mutate: Triangle | None = None,
-) -> Triangle:
-    area = -1.0
-    triangle = None
-    while triangle is None or area < min_area or max_area < area:
-        triangle = _generate_candidate_triangle(max_x, max_y, mutate)
-        area = calculate_triangle_area(triangle)
-    return triangle
-
-
-def _generate_candidate_triangle(
-    max_x: int,
-    max_y: int,
+    delta: int,
     mutate: Triangle | None = None,
 ) -> Triangle:
     if mutate is not None:
-        x = [p[0] for p in mutate]
-        y = [p[1] for p in mutate]
-        which_point = random.randint(0, 2)
-        if random.random() < 0.5:
-            x[which_point] = random.randint(0, max_x)
-        else:
-            y[which_point] = random.randint(0, max_y)
+        (x1, y1), (x2, y2), (x3, y3) = mutate
+        match random.randint(1, 3):
+            case 1:
+                x1 = clamp(x1 + random.randint(-delta, delta), -delta, max_x + delta)
+                y1 = clamp(y1 + random.randint(-delta, delta), -delta, max_y + delta)
+            case 2:
+                x2 = clamp(x2 + random.randint(-delta, delta), -delta, max_x + delta)
+                y2 = clamp(y2 + random.randint(-delta, delta), -delta, max_y + delta)
+            case 3:
+                x3 = clamp(x3 + random.randint(-delta, delta), -delta, max_x + delta)
+                y3 = clamp(y3 + random.randint(-delta, delta), -delta, max_y + delta)
+            case _:
+                pass  # impossible
     else:
-        x = [random.randint(0, max_x) for _ in range(3)]
-        y = [random.randint(0, max_y) for _ in range(3)]
-    return ((x[0], y[0]), (x[1], y[1]), (x[2], y[2]))
+        x1 = random.randint(0, max_x)
+        y1 = random.randint(0, max_y)
+        x2 = x1 + random.randint(-delta, delta)
+        y2 = y1 + random.randint(-delta, delta)
+        x3 = x1 + random.randint(-delta, delta)
+        y3 = y1 + random.randint(-delta, delta)
+    return (x1, y1), (x2, y2), (x3, y3)
 
 
 def get_average_color(image: Image.Image, triangle_coords: Triangle) -> RGB:
@@ -108,9 +109,7 @@ def get_average_color(image: Image.Image, triangle_coords: Triangle) -> RGB:
 
 def calculate_triangle_area(triangle: Triangle) -> float:
     """Calculate the area of a triangle."""
-    x1, y1 = triangle[0]
-    x2, y2 = triangle[1]
-    x3, y3 = triangle[2]
+    (x1, y1), (x2, y2), (x3, y3) = triangle
     return abs((x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)) / 2)
 
 
@@ -125,14 +124,13 @@ def choose_next_triangle(
     current_difference: int,
     last_triangle: ColorTriangle | None,
     attempts: int,
-    min_area: float,
-    max_area: float,
     progress_dict: ProgressDict,
     task_id: TaskID,
 ) -> ColorTriangle:
     input_image = INPUT_IMG.get()
     output_image = OUTPUT_IMG.get()
     width, height = input_image.size
+    delta = clamp(width // 100, 16, 128)
 
     # Calculate the difference between the input and the output image
     if last_triangle is not None:
@@ -152,7 +150,7 @@ def choose_next_triangle(
     while iterations < attempts:
         iterations += 1
         candidate_triangle = generate_candidate_triangle(
-            width, height, mutate=best_triangle, min_area=min_area, max_area=max_area
+            width, height, delta, mutate=best_triangle
         )
         candidate_color = get_average_color(input_image, candidate_triangle)
         new_output_image = apply_triangle(
@@ -214,7 +212,6 @@ async def reduce_image_to_output(
     num_triangles: int = 500,
     attempts_per_triangle: int = 1000,
     max_retries: int = 3,
-    min_area_pct: float = 0.025,
 ) -> None:
     init_images(input_path)
     triangles: list[ColorTriangle] = []
@@ -222,8 +219,6 @@ async def reduce_image_to_output(
 
     input_image = INPUT_IMG.get()
     output_image = OUTPUT_IMG.get()
-    width, height = input_image.size
-    image_area = width * height
     current_difference = calculate_difference(input_image, output_image)
 
     with (
@@ -249,14 +244,6 @@ async def reduce_image_to_output(
         )
         while len(triangles) < num_triangles and retries < max_retries:
             last_triangle = triangles[-1] if triangles and retries == 0 else None
-            percentage = len(triangles) / num_triangles
-            min_area = max(
-                0, min_area_pct * (image_area - 10 * percentage * image_area)
-            )
-            max_area = max(
-                min_area_pct * image_area,
-                image_area * min_area_pct + image_area * (0.5 - percentage),
-            )
             attempts = [
                 loop.run_in_executor(
                     pool,
@@ -264,8 +251,6 @@ async def reduce_image_to_output(
                     current_difference,
                     last_triangle,
                     attempts_per_triangle,
-                    min_area,
-                    max_area,
                     _progress,
                     _tasks[i],
                 )
