@@ -133,7 +133,12 @@ def get_average_color(pixels: Pixels, triangle: ColorTriangle) -> RGB:
 def apply_triangle(
     pixels: Pixels, triangle: ColorTriangle, detailed: bool = False
 ) -> Pixels:
-    output = np.copy(pixels)  # FIXME: avoid this with an Undo
+    output = np.copy(pixels)  # looks ugly but apparently much cheaper than polygon calc
+    if detailed:
+        triangle = triangle.copy()
+        for i in range(3):
+            triangle.xs[i] *= 2
+            triangle.ys[i] *= 2
     rr, cc = polygon(triangle.ys, triangle.xs, shape=pixels.shape[:2])
     output[rr, cc] = triangle.color
     if detailed:
@@ -172,7 +177,6 @@ def _choose_next_triangle(
     input_pixels = INPUT_PIXELS.get()
     output_pixels = OUTPUT_PIXELS.get()
 
-    # Calculate the difference between the input and the output image
     if last_triangle is not None:
         output_pixels = apply_triangle(output_pixels, last_triangle)
         OUTPUT_PIXELS.set(output_pixels)
@@ -182,16 +186,16 @@ def _choose_next_triangle(
 
     update = progress_dict[task_id]
     mutate_at = int(attempts * (0.5 - current_triangle_count / total_triangle_count))
-    # mutate_at = 0
     iterations = 0
     while iterations < attempts:
-        iterations += 1
         try:
             candidate_triangle = generate_candidate_triangle(
                 input_pixels, mutate=best_triangle if iterations >= mutate_at else None
             )
         except LookupError:
             continue  # triangle entirely out of bounds
+
+        iterations += 1
         new_output_pixels = apply_triangle(output_pixels, candidate_triangle)
         new_difference = calculate_difference(input_pixels, new_output_pixels)
         if new_difference < smallest_difference:
@@ -227,14 +231,16 @@ def path_with_index(path: str | Path, index: int) -> Path:
     return p.with_name(n + f"_{index:03}").with_suffix(s)
 
 
-def init_images(input_path: str, average: bool = False) -> None:
+def init_images(input_path: str, worker: bool) -> None:
     input_image = Image.open(input_path)
     width, height = input_image.size
-    if average:
-        average_color: RGB = input_image.resize((1, 1), resample=Image.LANCZOS).getpixel((0, 0))  # type: ignore
-        output_image = Image.new("RGB", (width, height), average_color)  # type: ignore
-    else:
+    L = Image.LANCZOS
+    if worker:
+        input_image = input_image.resize((width // 2, height // 2), resample=L)
         output_image = ImageOps.invert(input_image)
+    else:
+        average_color: RGB = input_image.resize((1, 1), resample=L).getpixel((0, 0))  # type: ignore
+        output_image = Image.new("RGB", (width, height), average_color)  # type: ignore
     INPUT_PIXELS.set(np.array(input_image))
     OUTPUT_PIXELS.set(np.array(output_image))
 
@@ -246,7 +252,7 @@ async def reduce_image_to_output(
     attempts_per_triangle: int = 1000,
     max_retries: int = 3,
 ) -> None:
-    init_images(input_path, average=True)
+    init_images(input_path, worker=False)
     triangles: list[ColorTriangle] = []
     loop = asyncio.get_running_loop()
 
@@ -258,7 +264,7 @@ async def reduce_image_to_output(
         multiprocessing.Manager() as manager,
         concurrent.futures.ProcessPoolExecutor(
             initializer=init_images,
-            initargs=(input_path,),
+            initargs=(input_path, True),
             max_workers=CPU_COUNT,
         ) as pool,
         Progress(console=console) as progress,
@@ -352,7 +358,6 @@ async def reduce_image_to_output(
                 output_pixels, p, diff_with=input_pixels, triangles=triangles
             )
 
-    # Save the final output image
     print(f"Output image saved to {output_path}")
     save_image_with_triangles(
         output_pixels, output_path, diff_with=input_pixels, triangles=triangles
