@@ -14,7 +14,7 @@ import click
 import numpy as np
 import numpy.typing as npt
 import imageio.v3 as iio
-from PIL import Image
+from PIL import Image, ImageOps
 from rich.progress import Progress, TaskID
 from rich.console import Console
 from skimage.draw import polygon, polygon_perimeter  # type: ignore
@@ -143,7 +143,8 @@ def apply_triangle(
 
 
 def choose_next_triangle(
-    current_difference: int,
+    total_triangle_count: int,
+    current_triangle_count: int,
     last_triangle: ColorTriangle | None,
     attempts: int,
     progress_dict: ProgressDict,
@@ -151,12 +152,18 @@ def choose_next_triangle(
 ) -> ColorTriangle:
     with profiling.maybe(progress_dict[task_id].profile_this):
         return _choose_next_triangle(
-            current_difference, last_triangle, attempts, progress_dict, task_id
+            total_triangle_count,
+            current_triangle_count,
+            last_triangle,
+            attempts,
+            progress_dict,
+            task_id,
         )
 
 
 def _choose_next_triangle(
-    current_difference: int,
+    total_triangle_count: int,
+    current_triangle_count: int,
     last_triangle: ColorTriangle | None,
     attempts: int,
     progress_dict: ProgressDict,
@@ -171,17 +178,17 @@ def _choose_next_triangle(
         OUTPUT_PIXELS.set(output_pixels)
 
     smallest_difference = calculate_difference(input_pixels, output_pixels)
-    assert smallest_difference == current_difference, "Workers out of sync with manager"
-
     best_triangle = None
 
     update = progress_dict[task_id]
+    mutate_at = int(attempts * (0.5 - current_triangle_count / total_triangle_count))
+    # mutate_at = 0
     iterations = 0
     while iterations < attempts:
         iterations += 1
         try:
             candidate_triangle = generate_candidate_triangle(
-                input_pixels, mutate=best_triangle
+                input_pixels, mutate=best_triangle if iterations >= mutate_at else None
             )
         except LookupError:
             continue  # triangle entirely out of bounds
@@ -192,7 +199,8 @@ def _choose_next_triangle(
             smallest_difference = new_difference
             best_triangle = candidate_triangle
         update.completed = iterations
-        progress_dict[task_id] = update  # shared dict needs explicit assignment
+        if iterations % 10 == 0 or iterations == attempts:
+            progress_dict[task_id] = update  # shared dict needs explicit assignment
 
     if best_triangle is None:
         raise LookupError(f"Couldn't improve the score in {attempts} iterations")
@@ -219,11 +227,14 @@ def path_with_index(path: str | Path, index: int) -> Path:
     return p.with_name(n + f"_{index:03}").with_suffix(s)
 
 
-def init_images(input_path: str) -> None:
+def init_images(input_path: str, average: bool = False) -> None:
     input_image = Image.open(input_path)
     width, height = input_image.size
-    average_color: RGB = input_image.resize((1, 1), resample=Image.LANCZOS).getpixel((0, 0))  # type: ignore
-    output_image = Image.new("RGB", (width, height), average_color)  # type: ignore
+    if average:
+        average_color: RGB = input_image.resize((1, 1), resample=Image.LANCZOS).getpixel((0, 0))  # type: ignore
+        output_image = Image.new("RGB", (width, height), average_color)  # type: ignore
+    else:
+        output_image = ImageOps.invert(input_image)
     INPUT_PIXELS.set(np.array(input_image))
     OUTPUT_PIXELS.set(np.array(output_image))
 
@@ -235,13 +246,13 @@ async def reduce_image_to_output(
     attempts_per_triangle: int = 1000,
     max_retries: int = 3,
 ) -> None:
-    init_images(input_path)
+    init_images(input_path, average=True)
     triangles: list[ColorTriangle] = []
     loop = asyncio.get_running_loop()
 
     input_pixels = INPUT_PIXELS.get()
     output_pixels = OUTPUT_PIXELS.get()
-    current_difference = calculate_difference(input_pixels, output_pixels)
+    current_difference = 0
 
     with (
         multiprocessing.Manager() as manager,
@@ -257,7 +268,7 @@ async def reduce_image_to_output(
         for i in range(CPU_COUNT):
             _tasks.append(progress.add_task(f"task {i+1}", visible=False))
             _progress[_tasks[i]] = ProgressUpdate(
-                completed=0, total=attempts_per_triangle, profile_this=i == 0
+                completed=0, total=attempts_per_triangle, profile_this=False  # i == 0
             )
 
         retries = 0
@@ -270,7 +281,8 @@ async def reduce_image_to_output(
                 loop.run_in_executor(
                     pool,
                     choose_next_triangle,
-                    current_difference,
+                    num_triangles,
+                    len(triangles),
                     last_triangle,
                     attempts_per_triangle,
                     _progress,
