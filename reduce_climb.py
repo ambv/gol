@@ -1,7 +1,7 @@
 import asyncio
 import concurrent.futures
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import multiprocessing
 from pathlib import Path
 import os
@@ -10,15 +10,18 @@ from typing import cast, TypeVar
 
 import click
 import numpy as np
+import numpy.typing as npt
 from PIL import Image, ImageDraw
 from rich.progress import Progress, TaskID
 from rich.console import Console
+
+import profiling
 
 
 Point = tuple[int, int]
 Triangle = tuple[Point, Point, Point]
 RGB = tuple[int, int, int]
-Num = TypeVar('Num', int, float)
+Num = TypeVar("Num", int, float)
 
 
 @dataclass
@@ -32,6 +35,7 @@ class ColorTriangle:
 class ProgressUpdate:
     completed: int
     total: int
+    profile_this: bool = field(default=False)
 
     def done(self):
         return self.completed == self.total
@@ -88,21 +92,56 @@ def generate_candidate_triangle(
     return (x1, y1), (x2, y2), (x3, y3)
 
 
-def get_average_color(image: Image.Image, triangle_coords: Triangle) -> RGB:
-    width, height = image.size
-    pixels = np.array(image)
-    mask = np.zeros((height, width), dtype=bool)
-    mask_img = Image.new("L", (width, height))
+def get_average_color(pixels: npt.NDArray[np.uint8], triangle_coords: Triangle) -> RGB:
+    height, width, _ = pixels.shape
+    mask_img = Image.new("1", (width, height))
     draw = ImageDraw.Draw(mask_img)
-    draw.polygon(triangle_coords, outline=1, fill=1)
-    mask_pixels = np.array(mask_img, dtype=bool)
-    mask[:, :] = mask_pixels
+    draw.polygon(triangle_coords, fill=1)
+    mask = np.array(mask_img)
 
     num_pixels = np.sum(mask)
     if num_pixels == 0:
         raise LookupError("No pixels under the triangle")
 
     masked_pixels = pixels * mask[..., np.newaxis]
+    average_color = np.sum(masked_pixels, axis=(0, 1)) // num_pixels
+    return tuple(average_color.tolist())  # type: ignore
+
+
+def barycentric_get_average_color(image: Image.Image, triangle_coords: Triangle) -> RGB:
+    width, height = image.size
+    pixels = np.array(image)
+
+    # Generate grid of coordinates for all pixels in the image
+    x, y = np.meshgrid(np.arange(width), np.arange(height))
+    coordinates = np.stack((x, y), axis=-1)
+
+    # Calculate barycentric coordinates for all pixels
+    p1, p2, p3 = np.array(triangle_coords)
+    v0 = p3 - p1
+    v1 = p2 - p1
+    v2 = coordinates - p1
+    dot00 = np.sum(v0 * v0, axis=-1)
+    dot01 = np.sum(v0 * v1, axis=-1)
+    dot02 = np.sum(v0 * v2, axis=-1)
+    dot11 = np.sum(v1 * v1, axis=-1)
+    dot12 = np.sum(v1 * v2, axis=-1)
+    inv_denominator = 1.0 / (dot00 * dot11 - dot01 * dot01)
+    w1 = (dot11 * dot02 - dot01 * dot12) * inv_denominator
+    w2 = (dot00 * dot12 - dot01 * dot02) * inv_denominator
+    w3 = 1.0 - w1 - w2
+
+    # Filter pixels within the triangle
+    valid_pixels = (w1 >= 0) & (w2 >= 0) & (w3 >= 0)
+
+    # Apply mask to the image
+    masked_pixels = pixels * valid_pixels[..., np.newaxis]
+
+    # Calculate the average color
+    num_pixels = np.sum(valid_pixels)
+    if num_pixels == 0:
+        raise LookupError("No pixels under the triangle")
+
     average_color = np.sum(masked_pixels, axis=(0, 1)) // num_pixels
     return tuple(average_color.tolist())  # type: ignore
 
@@ -127,6 +166,19 @@ def choose_next_triangle(
     progress_dict: ProgressDict,
     task_id: TaskID,
 ) -> ColorTriangle:
+    with profiling.maybe(progress_dict[task_id].profile_this):
+        return _choose_next_triangle(
+            current_difference, last_triangle, attempts, progress_dict, task_id
+        )
+
+
+def _choose_next_triangle(
+    current_difference: int,
+    last_triangle: ColorTriangle | None,
+    attempts: int,
+    progress_dict: ProgressDict,
+    task_id: TaskID,
+) -> ColorTriangle:
     input_image = INPUT_IMG.get()
     output_image = OUTPUT_IMG.get()
     width, height = input_image.size
@@ -142,6 +194,7 @@ def choose_next_triangle(
     smallest_difference = calculate_difference(input_image, output_image)
     assert smallest_difference == current_difference, "Workers out of sync with manager"
 
+    input_pixels = np.array(input_image)
     best_triangle = None
     best_color = None
 
@@ -152,7 +205,7 @@ def choose_next_triangle(
         candidate_triangle = generate_candidate_triangle(
             width, height, delta, mutate=best_triangle
         )
-        candidate_color = get_average_color(input_image, candidate_triangle)
+        candidate_color = get_average_color(input_pixels, candidate_triangle)
         new_output_image = apply_triangle(
             output_image, candidate_triangle, candidate_color
         )
@@ -235,7 +288,7 @@ async def reduce_image_to_output(
         for i in range(CPU_COUNT):
             _tasks.append(progress.add_task(f"task {i+1}", visible=False))
             _progress[_tasks[i]] = ProgressUpdate(
-                completed=0, total=attempts_per_triangle
+                completed=0, total=attempts_per_triangle, profile_this=i == 0
             )
 
         retries = 0
