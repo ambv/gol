@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import concurrent.futures
 from contextvars import ContextVar
@@ -12,26 +14,44 @@ import click
 import numpy as np
 import numpy.typing as npt
 import imageio.v3 as iio
-from PIL import Image, ImageDraw
+from PIL import Image
 from rich.progress import Progress, TaskID
 from rich.console import Console
-import skimage as ski
+from skimage.draw import polygon, polygon_perimeter  # type: ignore
 
 import profiling
 
 
 Point = tuple[int, int]
-Triangle = tuple[Point, Point, Point]
 RGB = tuple[int, int, int]
 Num = TypeVar("Num", int, float)
 Pixels = npt.NDArray[np.uint8]
 
 
+BLACK: RGB = (0, 0, 0)
+
+
 @dataclass
 class ColorTriangle:
-    color: RGB
-    triangle: Triangle
-    difference: int
+    xs: list[int]
+    ys: list[int]
+    color: RGB = field(default=BLACK)
+    difference: int = field(default=0)
+
+    def copy(
+        self,
+        *,
+        xs: list[int] | None = None,
+        ys: list[int] | None = None,
+        color: RGB | None = None,
+        difference: int | None = None,
+    ) -> ColorTriangle:
+        return ColorTriangle(
+            xs=list(self.xs) if xs is None else xs,
+            ys=list(self.ys) if ys is None else ys,
+            color=self.color if color is None else color,
+            difference=self.difference if difference is None else difference,
+        )
 
 
 @dataclass
@@ -50,8 +70,8 @@ ProgressDict = dict[TaskID, ProgressUpdate]
 console = Console()
 print = console.print
 CPU_COUNT: int = os.cpu_count() or 2
-OUTPUT_IMG: ContextVar[Image.Image] = ContextVar("output_image")
 INPUT_PIXELS: ContextVar[Pixels] = ContextVar("input_pixels")
+OUTPUT_PIXELS: ContextVar[Pixels] = ContextVar("output_pixels")
 
 
 def clamp(num: Num, minimum: Num, maximum: Num) -> Num:
@@ -66,25 +86,22 @@ def calculate_difference(image1: Pixels, image2: Pixels) -> int:
 
 
 def generate_candidate_triangle(
-    max_x: int,
-    max_y: int,
-    delta: int,
-    mutate: Triangle | None = None,
-) -> Triangle:
+    pixels: Pixels,
+    delta: int | None = None,
+    mutate: ColorTriangle | None = None,
+) -> ColorTriangle:
+    max_y, max_x = pixels.shape[:2]
+    delta = clamp(max_x // 100, 16, 128)
+
     if mutate is not None:
-        (x1, y1), (x2, y2), (x3, y3) = mutate
-        match random.randint(1, 3):
-            case 1:
-                x1 = clamp(x1 + random.randint(-delta, delta), -delta, max_x + delta)
-                y1 = clamp(y1 + random.randint(-delta, delta), -delta, max_y + delta)
-            case 2:
-                x2 = clamp(x2 + random.randint(-delta, delta), -delta, max_x + delta)
-                y2 = clamp(y2 + random.randint(-delta, delta), -delta, max_y + delta)
-            case 3:
-                x3 = clamp(x3 + random.randint(-delta, delta), -delta, max_x + delta)
-                y3 = clamp(y3 + random.randint(-delta, delta), -delta, max_y + delta)
-            case _:
-                pass  # impossible
+        result = mutate.copy(color=BLACK, difference=0)
+        idx = random.randint(0, 2)
+        result.xs[idx] = clamp(
+            result.xs[idx] + random.randint(-delta, delta), -delta, max_x + delta
+        )
+        result.ys[idx] = clamp(
+            result.ys[idx] + random.randint(-delta, delta), -delta, max_y + delta
+        )
     else:
         x1 = random.randint(0, max_x)
         y1 = random.randint(0, max_y)
@@ -92,25 +109,19 @@ def generate_candidate_triangle(
         y2 = y1 + random.randint(-delta, delta)
         x3 = x1 + random.randint(-delta, delta)
         y3 = y1 + random.randint(-delta, delta)
-    return (x1, y1), (x2, y2), (x3, y3)
+        result = ColorTriangle(
+            xs=[x1, x2, x3],
+            ys=[y1, y2, y3],
+        )
+    result.color = get_average_color(pixels, result)
+    return result
 
 
-def get_average_color(pixels: Pixels, triangle: Triangle) -> RGB:
+def get_average_color(pixels: Pixels, triangle: ColorTriangle) -> RGB:
     rr: npt.NDArray[np.int64]
     cc: npt.NDArray[np.int64]
 
-    rr, cc = ski.draw.polygon(
-        [p[1] for p in triangle],
-        [p[0] for p in triangle],
-        shape=pixels.shape[:2],
-    )
-    """
-    rr, cc = ski.draw.polygon_perimeter(
-        [p[1] for p in triangle],
-        [p[0] for p in triangle],
-        shape=pixels.shape[:2],
-    )
-    """
+    rr, cc = polygon(triangle.ys, triangle.xs, shape=pixels.shape[:2])
     num_pixels = len(rr)
     if num_pixels == 0:
         raise LookupError("No pixels under the triangle")
@@ -119,16 +130,12 @@ def get_average_color(pixels: Pixels, triangle: Triangle) -> RGB:
     return tuple(average_color.tolist())  # type: ignore
 
 
-def calculate_triangle_area(triangle: Triangle) -> float:
-    """Calculate the area of a triangle."""
-    (x1, y1), (x2, y2), (x3, y3) = triangle
-    return abs((x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)) / 2)
-
-
-def apply_triangle(image: Image.Image, triangle: Triangle, color: RGB) -> Image.Image:
-    output = image.copy()
-    draw = ImageDraw.Draw(output)
-    draw.polygon(triangle, fill=color)
+def apply_triangle(pixels: Pixels, triangle: ColorTriangle) -> Pixels:
+    output = np.copy(pixels)  # FIXME: avoid this with an Undo
+    rr, cc = polygon(triangle.ys, triangle.xs, shape=pixels.shape[:2])
+    output[rr, cc] = triangle.color
+    rr, cc = polygon_perimeter(triangle.ys, triangle.xs, shape=pixels.shape[:2])
+    output[rr, cc] = triangle.color
     return output
 
 
@@ -153,72 +160,59 @@ def _choose_next_triangle(
     task_id: TaskID,
 ) -> ColorTriangle:
     input_pixels = INPUT_PIXELS.get()
-    output_image = OUTPUT_IMG.get()
-    height, width = input_pixels.shape[:2]
-    delta = clamp(width // 100, 16, 128)
+    output_pixels = OUTPUT_PIXELS.get()
 
     # Calculate the difference between the input and the output image
     if last_triangle is not None:
-        output_image = apply_triangle(
-            output_image, last_triangle.triangle, last_triangle.color
-        )
-        OUTPUT_IMG.set(output_image)
-
-    output_pixels = np.array(output_image)
+        output_pixels = apply_triangle(output_pixels, last_triangle)
+        OUTPUT_PIXELS.set(output_pixels)
 
     smallest_difference = calculate_difference(input_pixels, output_pixels)
     assert smallest_difference == current_difference, "Workers out of sync with manager"
 
     best_triangle = None
-    best_color = None
 
     update = progress_dict[task_id]
     iterations = 0
     while iterations < attempts:
         iterations += 1
-        candidate_triangle = generate_candidate_triangle(
-            width, height, delta, mutate=best_triangle
-        )
         try:
-            candidate_color = get_average_color(input_pixels, candidate_triangle)
+            candidate_triangle = generate_candidate_triangle(
+                input_pixels, mutate=best_triangle
+            )
         except LookupError:
             continue  # triangle entirely out of bounds
-        new_output_image = apply_triangle(
-            output_image, candidate_triangle, candidate_color
-        )
-        new_output_pixels = np.array(new_output_image)
+        new_output_pixels = apply_triangle(output_pixels, candidate_triangle)
         new_difference = calculate_difference(input_pixels, new_output_pixels)
         if new_difference < smallest_difference:
+            candidate_triangle.difference = new_difference
             smallest_difference = new_difference
             best_triangle = candidate_triangle
-            best_color = candidate_color
         update.completed = iterations
         progress_dict[task_id] = update  # shared dict needs explicit assignment
 
-    if best_triangle is not None and best_color is not None:
-        return ColorTriangle(
-            color=best_color, triangle=best_triangle, difference=smallest_difference
-        )
+    if best_triangle is None:
+        raise LookupError(f"Couldn't improve the score in {attempts} iterations")
 
-    raise LookupError(f"Couldn't improve the score in {attempts} iterations")
+    return best_triangle
 
 
 def save_image_with_triangles(
-    image: Image.Image,
+    pixels: Pixels,
     path: Path | str,
     *,
     diff_with: Pixels,
     triangles: list[ColorTriangle],
 ) -> None:
     for i, t in enumerate(triangles):
-        image = apply_triangle(image, t.triangle, t.color)
-        actual = calculate_difference(diff_with, np.array(image))
+        pixels = apply_triangle(pixels, t)
+        actual = calculate_difference(diff_with, pixels)
         if actual != t.difference:
             print(
                 f"warning: invalid difference at triangle {i}."
                 f" Expected: {t.difference}, actual: {actual}"
             )
-    image.save(path)
+    iio.imwrite(path, pixels)
 
 
 def path_with_index(path: str | Path, index: int) -> Path:
@@ -234,7 +228,7 @@ def init_images(input_path: str) -> None:
     average_color: RGB = input_image.resize((1, 1), resample=Image.LANCZOS).getpixel((0, 0))  # type: ignore
     output_image = Image.new("RGB", (width, height), average_color)  # type: ignore
     INPUT_PIXELS.set(np.array(input_image))
-    OUTPUT_IMG.set(output_image)
+    OUTPUT_PIXELS.set(np.array(output_image))
 
 
 async def reduce_image_to_output(
@@ -249,8 +243,7 @@ async def reduce_image_to_output(
     loop = asyncio.get_running_loop()
 
     input_pixels = INPUT_PIXELS.get()
-    output_image = OUTPUT_IMG.get()
-    output_pixels = np.array(output_image)
+    output_pixels = OUTPUT_PIXELS.get()
     current_difference = calculate_difference(input_pixels, output_pixels)
 
     with (
@@ -347,13 +340,13 @@ async def reduce_image_to_output(
             )
             p = path_with_index(output_path, len(triangles))
             save_image_with_triangles(
-                output_image, p, diff_with=input_pixels, triangles=triangles
+                output_pixels, p, diff_with=input_pixels, triangles=triangles
             )
 
     # Save the final output image
     print(f"Output image saved to {output_path}")
     save_image_with_triangles(
-        output_image, output_path, diff_with=input_pixels, triangles=triangles
+        output_pixels, output_path, diff_with=input_pixels, triangles=triangles
     )
 
 
@@ -361,9 +354,9 @@ async def reduce_image_to_output(
 @click.argument("input_path")
 @click.argument("output_path")
 def diff_images(input_path: str, output_path: str) -> None:
-    input_image = Image.open(input_path)
-    output_image = Image.open(output_path)
-    print(calculate_difference(np.array(input_image), np.array(output_image)))
+    input_pixels = iio.imread(input_path)
+    output_pixels = iio.imread(output_path)
+    print(calculate_difference(input_pixels, output_pixels))
 
 
 @click.command()
