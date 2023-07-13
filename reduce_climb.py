@@ -156,34 +156,53 @@ def choose_next_triangle(
     task_id: TaskID,
 ) -> ColorTriangle:
     with profiling.maybe(progress_dict[task_id].profile_this):
-        return _choose_next_triangle(
-            total_triangle_count,
-            current_triangle_count,
-            last_triangle,
-            attempts,
-            progress_dict,
-            task_id,
-        )
+        input_pixels = INPUT_PIXELS.get()
+        output_pixels = OUTPUT_PIXELS.get()
+        if last_triangle is not None:
+            output_pixels = apply_triangle(output_pixels, last_triangle)
+            OUTPUT_PIXELS.set(output_pixels)
+
+        smallest_difference = calculate_difference(input_pixels, output_pixels)
+        best_triangle: ColorTriangle | None = None
+        for i in range(4):
+            offset = i * attempts // 4
+            try:
+                candidate = _choose_next_triangle(
+                    input_pixels,
+                    output_pixels,
+                    total_triangle_count,
+                    current_triangle_count,
+                    smallest_difference,  # no difference passing
+                    attempts // 4,
+                    progress_dict,
+                    task_id,
+                    offset,
+                )
+            except LookupError:
+                print("lost round")
+                continue
+
+            if best_triangle is None or candidate.difference < best_triangle.difference:
+                best_triangle = candidate
+
+        if best_triangle is None:
+            raise LookupError(f"Couldn't improve the score in {attempts} iterations")
+
+        return best_triangle
 
 
 def _choose_next_triangle(
+    input_pixels: Pixels,
+    output_pixels: Pixels,
     total_triangle_count: int,
     current_triangle_count: int,
-    last_triangle: ColorTriangle | None,
+    smallest_difference: int,
     attempts: int,
     progress_dict: ProgressDict,
     task_id: TaskID,
+    offset: int,
 ) -> ColorTriangle:
-    input_pixels = INPUT_PIXELS.get()
-    output_pixels = OUTPUT_PIXELS.get()
-
-    if last_triangle is not None:
-        output_pixels = apply_triangle(output_pixels, last_triangle)
-        OUTPUT_PIXELS.set(output_pixels)
-
-    smallest_difference = calculate_difference(input_pixels, output_pixels)
     best_triangle = None
-
     update = progress_dict[task_id]
     mutate_at = int(attempts * (0.5 - current_triangle_count / total_triangle_count))
     iterations = 0
@@ -196,14 +215,15 @@ def _choose_next_triangle(
             continue  # triangle entirely out of bounds
 
         iterations += 1
+        update.completed = offset + iterations
+
         new_output_pixels = apply_triangle(output_pixels, candidate_triangle)
         new_difference = calculate_difference(input_pixels, new_output_pixels)
         if new_difference < smallest_difference:
             candidate_triangle.difference = new_difference
             smallest_difference = new_difference
             best_triangle = candidate_triangle
-        update.completed = iterations
-        if iterations % 10 == 0 or iterations == attempts:
+        if iterations % 33 == 0 or iterations == attempts:
             progress_dict[task_id] = update  # shared dict needs explicit assignment
 
     if best_triangle is None:
@@ -249,7 +269,7 @@ async def reduce_image_to_output(
     input_path: str,
     output_path: str,
     num_triangles: int = 500,
-    attempts_per_triangle: int = 1000,
+    attempts_per_triangle: int = 4000,
     max_retries: int = 3,
 ) -> None:
     init_images(input_path, worker=False)
