@@ -22,6 +22,7 @@ Point = tuple[int, int]
 Triangle = tuple[Point, Point, Point]
 RGB = tuple[int, int, int]
 Num = TypeVar("Num", int, float)
+Pixels = npt.NDArray[np.uint8]
 
 
 @dataclass
@@ -49,15 +50,16 @@ print = console.print
 CPU_COUNT: int = os.cpu_count() or 2
 INPUT_IMG: ContextVar[Image.Image] = ContextVar("input_image")
 OUTPUT_IMG: ContextVar[Image.Image] = ContextVar("output_image")
+INPUT_PIXELS: ContextVar[Pixels] = ContextVar("input_pixels")
 
 
 def clamp(num: Num, minimum: Num, maximum: Num) -> Num:
     return min(maximum, max(minimum, num))
 
 
-def calculate_difference(image1: Image.Image, image2: Image.Image) -> int:
+def calculate_difference(image1: Pixels, image2: Pixels) -> int:
     """Calculate the difference between two images."""
-    diff = np.array(image1) - np.array(image2)
+    diff = image1 - image2
     squared_diff = np.square(diff)
     return np.sum(squared_diff)
 
@@ -92,57 +94,30 @@ def generate_candidate_triangle(
     return (x1, y1), (x2, y2), (x3, y3)
 
 
-def get_average_color(pixels: npt.NDArray[np.uint8], triangle_coords: Triangle) -> RGB:
+def get_triangle_box(triangle: Triangle) -> tuple[slice, slice]:
+    """Returns the bounds of the given triangle as a tuple."""
+    (x1, y1), (x2, y2), (x3, y3) = triangle
+    xs = slice(max(0, min(x1, x2, x3)), max(x1, x2, x3) + 1)
+    ys = slice(max(0, min(y1, y2, y3)), max(y1, y2, y3) + 1)
+    return xs, ys
+
+
+def get_average_color(pixels: Pixels, triangle: Triangle) -> RGB:
     height, width, _ = pixels.shape
     mask_img = Image.new("1", (width, height))
     draw = ImageDraw.Draw(mask_img)
-    draw.polygon(triangle_coords, fill=1)
+    draw.polygon(triangle, fill=1)
     mask = np.array(mask_img)
+    xs, ys = get_triangle_box(triangle)
 
+    mask = mask[ys, xs]
     num_pixels = np.sum(mask)
     if num_pixels == 0:
         raise LookupError("No pixels under the triangle")
 
-    masked_pixels = pixels * mask[..., np.newaxis]
+    masked_pixels = pixels[ys, xs] * mask[..., np.newaxis]
     average_color = np.sum(masked_pixels, axis=(0, 1)) // num_pixels
-    return tuple(average_color.tolist())  # type: ignore
 
-
-def barycentric_get_average_color(image: Image.Image, triangle_coords: Triangle) -> RGB:
-    width, height = image.size
-    pixels = np.array(image)
-
-    # Generate grid of coordinates for all pixels in the image
-    x, y = np.meshgrid(np.arange(width), np.arange(height))
-    coordinates = np.stack((x, y), axis=-1)
-
-    # Calculate barycentric coordinates for all pixels
-    p1, p2, p3 = np.array(triangle_coords)
-    v0 = p3 - p1
-    v1 = p2 - p1
-    v2 = coordinates - p1
-    dot00 = np.sum(v0 * v0, axis=-1)
-    dot01 = np.sum(v0 * v1, axis=-1)
-    dot02 = np.sum(v0 * v2, axis=-1)
-    dot11 = np.sum(v1 * v1, axis=-1)
-    dot12 = np.sum(v1 * v2, axis=-1)
-    inv_denominator = 1.0 / (dot00 * dot11 - dot01 * dot01)
-    w1 = (dot11 * dot02 - dot01 * dot12) * inv_denominator
-    w2 = (dot00 * dot12 - dot01 * dot02) * inv_denominator
-    w3 = 1.0 - w1 - w2
-
-    # Filter pixels within the triangle
-    valid_pixels = (w1 >= 0) & (w2 >= 0) & (w3 >= 0)
-
-    # Apply mask to the image
-    masked_pixels = pixels * valid_pixels[..., np.newaxis]
-
-    # Calculate the average color
-    num_pixels = np.sum(valid_pixels)
-    if num_pixels == 0:
-        raise LookupError("No pixels under the triangle")
-
-    average_color = np.sum(masked_pixels, axis=(0, 1)) // num_pixels
     return tuple(average_color.tolist())  # type: ignore
 
 
@@ -191,10 +166,12 @@ def _choose_next_triangle(
         )
         OUTPUT_IMG.set(output_image)
 
-    smallest_difference = calculate_difference(input_image, output_image)
+    input_pixels = INPUT_PIXELS.get()
+    output_pixels = np.array(output_image)
+
+    smallest_difference = calculate_difference(input_pixels, output_pixels)
     assert smallest_difference == current_difference, "Workers out of sync with manager"
 
-    input_pixels = np.array(input_image)
     best_triangle = None
     best_color = None
 
@@ -209,7 +186,8 @@ def _choose_next_triangle(
         new_output_image = apply_triangle(
             output_image, candidate_triangle, candidate_color
         )
-        new_difference = calculate_difference(input_image, new_output_image)
+        new_output_pixels = np.array(new_output_image)
+        new_difference = calculate_difference(input_pixels, new_output_pixels)
         if new_difference < smallest_difference:
             smallest_difference = new_difference
             best_triangle = candidate_triangle
@@ -229,12 +207,12 @@ def save_image_with_triangles(
     image: Image.Image,
     path: Path | str,
     *,
-    diff_with: Image.Image,
+    diff_with: Pixels,
     triangles: list[ColorTriangle],
 ) -> None:
     for i, t in enumerate(triangles):
         image = apply_triangle(image, t.triangle, t.color)
-        actual = calculate_difference(diff_with, image)
+        actual = calculate_difference(diff_with, np.array(image))
         if actual != t.difference:
             print(
                 f"warning: invalid difference at triangle {i}."
@@ -256,6 +234,7 @@ def init_images(input_path: str) -> None:
     average_color: RGB = input_image.resize((1, 1), resample=Image.LANCZOS).getpixel((0, 0))  # type: ignore
     output_image = Image.new("RGB", (width, height), average_color)  # type: ignore
     INPUT_IMG.set(input_image)
+    INPUT_PIXELS.set(np.array(input_image))
     OUTPUT_IMG.set(output_image)
 
 
@@ -270,9 +249,10 @@ async def reduce_image_to_output(
     triangles: list[ColorTriangle] = []
     loop = asyncio.get_running_loop()
 
-    input_image = INPUT_IMG.get()
+    input_pixels = INPUT_PIXELS.get()
     output_image = OUTPUT_IMG.get()
-    current_difference = calculate_difference(input_image, output_image)
+    output_pixels = np.array(output_image)
+    current_difference = calculate_difference(input_pixels, output_pixels)
 
     with (
         multiprocessing.Manager() as manager,
@@ -368,13 +348,13 @@ async def reduce_image_to_output(
             )
             p = path_with_index(output_path, len(triangles))
             save_image_with_triangles(
-                output_image, p, diff_with=input_image, triangles=triangles
+                output_image, p, diff_with=input_pixels, triangles=triangles
             )
 
     # Save the final output image
     print(f"Output image saved to {output_path}")
     save_image_with_triangles(
-        output_image, output_path, diff_with=input_image, triangles=triangles
+        output_image, output_path, diff_with=input_pixels, triangles=triangles
     )
 
 
@@ -384,7 +364,7 @@ async def reduce_image_to_output(
 def diff_images(input_path: str, output_path: str) -> None:
     input_image = Image.open(input_path)
     output_image = Image.open(output_path)
-    print(calculate_difference(input_image, output_image))
+    print(calculate_difference(np.array(input_image), np.array(output_image)))
 
 
 @click.command()
