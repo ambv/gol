@@ -11,9 +11,11 @@ from typing import cast, TypeVar
 import click
 import numpy as np
 import numpy.typing as npt
+import imageio.v3 as iio
 from PIL import Image, ImageDraw
 from rich.progress import Progress, TaskID
 from rich.console import Console
+import skimage as ski
 
 import profiling
 
@@ -48,7 +50,6 @@ ProgressDict = dict[TaskID, ProgressUpdate]
 console = Console()
 print = console.print
 CPU_COUNT: int = os.cpu_count() or 2
-INPUT_IMG: ContextVar[Image.Image] = ContextVar("input_image")
 OUTPUT_IMG: ContextVar[Image.Image] = ContextVar("output_image")
 INPUT_PIXELS: ContextVar[Pixels] = ContextVar("input_pixels")
 
@@ -94,30 +95,27 @@ def generate_candidate_triangle(
     return (x1, y1), (x2, y2), (x3, y3)
 
 
-def get_triangle_box(triangle: Triangle) -> tuple[slice, slice]:
-    """Returns the bounds of the given triangle as a tuple."""
-    (x1, y1), (x2, y2), (x3, y3) = triangle
-    xs = slice(max(0, min(x1, x2, x3)), max(x1, x2, x3) + 1)
-    ys = slice(max(0, min(y1, y2, y3)), max(y1, y2, y3) + 1)
-    return xs, ys
-
-
 def get_average_color(pixels: Pixels, triangle: Triangle) -> RGB:
-    height, width, _ = pixels.shape
-    mask_img = Image.new("1", (width, height))
-    draw = ImageDraw.Draw(mask_img)
-    draw.polygon(triangle, fill=1)
-    mask = np.array(mask_img)
-    xs, ys = get_triangle_box(triangle)
+    rr: npt.NDArray[np.int64]
+    cc: npt.NDArray[np.int64]
 
-    mask = mask[ys, xs]
-    num_pixels = np.sum(mask)
+    rr, cc = ski.draw.polygon(
+        [p[1] for p in triangle],
+        [p[0] for p in triangle],
+        shape=pixels.shape[:2],
+    )
+    """
+    rr, cc = ski.draw.polygon_perimeter(
+        [p[1] for p in triangle],
+        [p[0] for p in triangle],
+        shape=pixels.shape[:2],
+    )
+    """
+    num_pixels = len(rr)
     if num_pixels == 0:
         raise LookupError("No pixels under the triangle")
 
-    masked_pixels = pixels[ys, xs] * mask[..., np.newaxis]
-    average_color = np.sum(masked_pixels, axis=(0, 1)) // num_pixels
-
+    average_color = np.sum(pixels[rr, cc], axis=0) // num_pixels
     return tuple(average_color.tolist())  # type: ignore
 
 
@@ -154,9 +152,9 @@ def _choose_next_triangle(
     progress_dict: ProgressDict,
     task_id: TaskID,
 ) -> ColorTriangle:
-    input_image = INPUT_IMG.get()
+    input_pixels = INPUT_PIXELS.get()
     output_image = OUTPUT_IMG.get()
-    width, height = input_image.size
+    height, width = input_pixels.shape[:2]
     delta = clamp(width // 100, 16, 128)
 
     # Calculate the difference between the input and the output image
@@ -166,7 +164,6 @@ def _choose_next_triangle(
         )
         OUTPUT_IMG.set(output_image)
 
-    input_pixels = INPUT_PIXELS.get()
     output_pixels = np.array(output_image)
 
     smallest_difference = calculate_difference(input_pixels, output_pixels)
@@ -182,7 +179,10 @@ def _choose_next_triangle(
         candidate_triangle = generate_candidate_triangle(
             width, height, delta, mutate=best_triangle
         )
-        candidate_color = get_average_color(input_pixels, candidate_triangle)
+        try:
+            candidate_color = get_average_color(input_pixels, candidate_triangle)
+        except LookupError:
+            continue  # triangle entirely out of bounds
         new_output_image = apply_triangle(
             output_image, candidate_triangle, candidate_color
         )
@@ -233,7 +233,6 @@ def init_images(input_path: str) -> None:
     width, height = input_image.size
     average_color: RGB = input_image.resize((1, 1), resample=Image.LANCZOS).getpixel((0, 0))  # type: ignore
     output_image = Image.new("RGB", (width, height), average_color)  # type: ignore
-    INPUT_IMG.set(input_image)
     INPUT_PIXELS.set(np.array(input_image))
     OUTPUT_IMG.set(output_image)
 
