@@ -130,12 +130,15 @@ def get_average_color(pixels: Pixels, triangle: ColorTriangle) -> RGB:
     return tuple(average_color.tolist())  # type: ignore
 
 
-def apply_triangle(pixels: Pixels, triangle: ColorTriangle) -> Pixels:
+def apply_triangle(
+    pixels: Pixels, triangle: ColorTriangle, detailed: bool = False
+) -> Pixels:
     output = np.copy(pixels)  # FIXME: avoid this with an Undo
     rr, cc = polygon(triangle.ys, triangle.xs, shape=pixels.shape[:2])
     output[rr, cc] = triangle.color
-    rr, cc = polygon_perimeter(triangle.ys, triangle.xs, shape=pixels.shape[:2])
-    output[rr, cc] = triangle.color
+    if detailed:
+        rr, cc = polygon_perimeter(triangle.ys, triangle.xs, shape=pixels.shape[:2])
+        output[rr, cc] = triangle.color
     return output
 
 
@@ -204,14 +207,8 @@ def save_image_with_triangles(
     diff_with: Pixels,
     triangles: list[ColorTriangle],
 ) -> None:
-    for i, t in enumerate(triangles):
-        pixels = apply_triangle(pixels, t)
-        actual = calculate_difference(diff_with, pixels)
-        if actual != t.difference:
-            print(
-                f"warning: invalid difference at triangle {i}."
-                f" Expected: {t.difference}, actual: {actual}"
-            )
+    for t in triangles:
+        pixels = apply_triangle(pixels, t, detailed=True)
     iio.imwrite(path, pixels)
 
 
