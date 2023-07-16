@@ -1,46 +1,74 @@
+from dataclasses import dataclass, field
 import numpy as np
+import numpy.typing as npt
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from matplotlib.image import AxesImage
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
 
-def update(frame):
-    global grid
-    new_grid = np.copy(grid)
-    for i in range(rows):
-        for j in range(columns):
-            # Count the number of live neighbors
-            neighbors = (
-                grid[(i - 1) % rows, (j - 1) % columns]
-                + grid[(i - 1) % rows, j]
-                + grid[(i - 1) % rows, (j + 1) % columns]
-                + grid[i, (j - 1) % columns]
-                + grid[i, (j + 1) % columns]
-                + grid[(i + 1) % rows, (j - 1) % columns]
-                + grid[(i + 1) % rows, j]
-                + grid[(i + 1) % rows, (j + 1) % columns]
-            )
+@dataclass
+class GameOfLife:
+    rows: int
+    columns: int
+    fig: Figure = field(init=False)
+    ax: Axes = field(init=False)
+    grid: npt.NDArray[np.int64] = field(init=False)
+    image: AxesImage = field(init=False)
 
-            # Apply the rules of Conway's Game of Life
-            if grid[i, j] == 1 and (neighbors < 2 or neighbors > 3):
-                new_grid[i, j] = 0
-            elif grid[i, j] == 0 and neighbors == 3:
-                new_grid[i, j] = 1
+    def __post_init__(self):
+        self.fig, self.ax = plt.subplots()
+        self.grid = np.random.choice(
+            [0, 1],
+            size=(self.rows, self.columns),
+            p=[0.5, 0.5],
+        )
+        self.image = self.ax.imshow(
+            self.grid,
+            interpolation="nearest",
+            cmap="binary",
+        )
 
-    grid = new_grid
-    img.set_array(grid)
-    return [img]
+    def update(self, frame: int) -> tuple[AxesImage]:
+        old = self.grid
+        new = np.copy(old)
+        r = self.rows
+        c = self.columns
+        for i in range(r):
+            for j in range(c):
+                neighbors = (
+                    old[(i - 1) % r, (j - 1) % c]
+                    + old[(i - 1) % r, j]
+                    + old[(i - 1) % r, (j + 1) % c]
+                    + old[i, (j - 1) % c]
+                    + old[i, (j + 1) % c]
+                    + old[(i + 1) % r, (j - 1) % c]
+                    + old[(i + 1) % r, j]
+                    + old[(i + 1) % r, (j + 1) % c]
+                )
+
+                if old[i, j] == 1 and (neighbors < 2 or neighbors > 3):
+                    new[i, j] = 0
+                elif old[i, j] == 0 and neighbors == 3:
+                    new[i, j] = 1
+
+        self.grid = new
+        self.image.set_data(new)
+        return (self.image,)
 
 
-# Set up the initial grid
-rows, columns = 50, 50
-grid = np.random.choice([0, 1], size=(rows, columns), p=[0.5, 0.5])
+def main():
+    gol = GameOfLife(rows=50, columns=50)
+    anim = animation.FuncAnimation(
+        gol.fig,
+        gol.update,
+        frames=900,
+        interval=100,
+        blit=True,
+    )
+    anim.save("gol.mp4", fps=30, dpi=150, extra_args=["-vcodec", "libx264"])
 
-# Set up the figure and axis
-fig, ax = plt.subplots()
-img = ax.imshow(grid, interpolation="nearest", cmap="binary")
 
-# Create the animation
-ani = animation.FuncAnimation(fig, update, interval=20, blit=True)
-
-# Show the animation
-plt.show()
+if __name__ == "__main__":
+    main()
