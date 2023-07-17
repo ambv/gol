@@ -8,10 +8,10 @@ HEIGHT = 800
 
 def init() -> None:
     turtle.setup(WIDTH, HEIGHT)
-    # turtle.setworldcoordinates(0, 0, WIDTH, HEIGHT)
     turtle.speed(0)
     turtle.colormode(1.0)
-    turtle.bgcolor("black")
+    turtle.pencolor(1.0, 1.0, 1.0)
+    turtle.bgcolor(0.0, 0.0, 0.0)
     turtle.pensize(1)
     turtle.penup()
     turtle.hideturtle()
@@ -21,47 +21,40 @@ def init() -> None:
 def clifford_attractor(
     a: float, b: float, c: float, d: float, iterations: int, scale: int
 ) -> None:
-    x = 0.0
-    y = 0.0
+    x = y = 0.0
 
     for i in range(iterations):
-        part = (i + 1) / iterations
+        part = i / iterations
+        turtle.pencolor(part * part, part, part * part * part)
         size = 10 - 9 * part
         turtle.pensize(round(size))
-        turtle.pencolor(part * part, part, part * part * part)
+
         new_x = math.sin(a * y) + c * math.cos(a * x)
         new_y = math.sin(b * x) + d * math.cos(b * y)
 
         x = new_x
         y = new_y
 
-        scaled_x = x * scale
-        scaled_y = y * scale
-
-        turtle.goto(scaled_x, scaled_y)
+        turtle.goto(x * scale, y * scale)
         turtle.pendown()
         turtle.forward(0)
         turtle.penup()
 
-        if i % 500 == 0:
+        if i % 500 == 0 or (i + 1) == iterations:
             turtle.update()
-    
-    print("Done.")
+    turtle.done()
 
 
 def main() -> None:
     init()
-    # Draw the Clifford attractor
     clifford_attractor(
         a=1.7,
         b=1.7,
         c=0.6,
         d=1.2,
         iterations=50000,
-        scale=220,
+        scale=166,
     )
-    turtle.update()
-    turtle.done()
 
 
 if __name__ == "__main__":
