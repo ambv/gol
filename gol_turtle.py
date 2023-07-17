@@ -20,16 +20,75 @@ class GameOfLife:
             size=(self.rows, self.columns),
             p=[0.5, 0.5],
         )
+        self.predefined_grid()
         self.width = self.columns * self.size
         self.height = self.rows * self.size
         self.setup_turtle()
         self.draw_board()
+
+    def predefined_grid(self) -> None:
+        self.grid = np.zeros((self.rows, self.columns))
+        g = self.grid
+
+        # pulsar
+        g[2, 4:7] = 1
+        g[2, 10:13] = 1
+        g[4:7, 2] = 1
+        g[4:7, 7] = 1
+        g[4:7, 9] = 1
+        g[4:7, 14] = 1
+        g[7, 4:7] = 1
+        g[7, 10:13] = 1
+        g[9, 4:7] = 1
+        g[9, 10:13] = 1
+        g[10:13, 2] = 1
+        g[10:13, 7] = 1
+        g[10:13, 9] = 1
+        g[10:13, 14] = 1
+        g[14, 4:7] = 1
+        g[14, 10:13] = 1
+
+        # pentadecathlon
+        g[5, 24:27] = 1
+        g[6, 24] = 1
+        g[6, 26] = 1
+        g[7:11, 24:27] = 1
+        g[11, 24] = 1
+        g[11, 26] = 1
+        g[12, 24:27] = 1
+
+        # LWSS
+        g[20, 3:5] = 1
+        g[21, 2:6] = 1
+        g[22, 2:4] = 1
+        g[22, 5:7] = 1
+        g[23, 4:6] = 1
+
+        # MWSS
+        g[30, 13:16] = 1
+        g[31, 12:17] = 1
+        g[32, 12:15] = 1
+        g[32, 16:18] = 1
+        g[33, 15:17] = 1
+
+        # HWSS
+        g[40, 23:27] = 1
+        g[41, 22:28] = 1
+        g[42, 22:26] = 1
+        g[42, 27:29] = 1
+        g[43, 26:28] = 1
+
+        # glider
+        g[40, 6:8] = 1
+        g[41, 7:9] = 1
+        g[42, 6] = 1
 
     def setup_turtle(self) -> None:
         turtle.setup(self.width + 50, self.height + 50)
         turtle.screensize(self.width, self.height)
         turtle.speed(0)
         turtle.tracer(0)
+        turtle.hideturtle()
 
     def draw_board(self) -> None:
         g = self.grid
@@ -79,9 +138,12 @@ class GameOfLife:
         return self.grid[row, column]
 
     def animate(self) -> None:
+        from time import sleep
+
         while True:
             self.update_board()
             self.draw_board()
+            sleep(0.033)  # 30fps max
 
 
 def main() -> None:
