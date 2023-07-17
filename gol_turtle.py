@@ -1,62 +1,93 @@
+from dataclasses import dataclass, field
+
 import turtle
 import numpy as np
+import numpy.typing as npt
 
 
-def draw_cell(x, y, size):
-    turtle.penup()
-    turtle.goto(x, y)
-    turtle.pendown()
-    turtle.setheading(0)
-    turtle.fillcolor('black')
-    turtle.begin_fill()
-    for _ in range(4):
-        turtle.forward(size)
-        turtle.right(90)
-    turtle.end_fill()
+@dataclass
+class GameOfLife:
+    rows: int
+    columns: int
+    size: int
+    width: int = field(init=False)
+    height: int = field(init=False)
+    grid: npt.NDArray[np.int64] = field(init=False)
 
+    def __post_init__(self) -> None:
+        self.grid = np.random.choice(
+            [0, 1],
+            size=(self.rows, self.columns),
+            p=[0.5, 0.5],
+        )
+        self.width = self.columns * self.size
+        self.height = self.rows * self.size
+        self.setup_turtle()
+        self.draw_board()
 
-def animate_life(grid: np.array, size: int) -> None:
-    rows, columns = grid.shape
-    width = columns * size
-    height = rows * size
+    def setup_turtle(self) -> None:
+        turtle.setup(self.width + 50, self.height + 50)
+        turtle.screensize(self.width, self.height)
+        turtle.speed(0)
+        turtle.tracer(0)
 
-    turtle.setup(width + 50, height + 50)
-    turtle.screensize(width, height)
-    turtle.speed(0)
-    turtle.tracer(0)
-
-    for i in range(rows):
-        for j in range(columns):
-            if grid[i, j] == 1:
-                x = j * size - width / 2
-                y = height / 2 - i * size
-                draw_cell(x, y, size)
-
-    while True:
-        new_grid = np.copy(grid)
-        for i in range(rows):
-            for j in range(columns):
-                neighbors = np.sum(grid[max(i - 1, 0):min(i + 2, rows), max(j - 1, 0):min(j + 2, columns)]) - grid[i, j]
-                if grid[i, j] == 1 and (neighbors < 2 or neighbors > 3):
-                    new_grid[i, j] = 0
-                elif grid[i, j] == 0 and neighbors == 3:
-                    new_grid[i, j] = 1
-        grid = new_grid
-
+    def draw_board(self) -> None:
+        g = self.grid
         turtle.clear()
-        for i in range(rows):
-            for j in range(columns):
-                if grid[i, j] == 1:
-                    x = j * size - width / 2
-                    y = height / 2 - i * size
-                    draw_cell(x, y, size)
-
+        for i in range(self.rows):
+            for j in range(self.columns):
+                if g[i, j] == 1:
+                    self.draw_cell(i, j)
         turtle.update()
 
+    def draw_cell(self, row: int, column: int) -> None:
+        x = column * self.size - self.width / 2
+        y = self.height / 2 - row * self.size
 
-# Set up the initial grid
-rows, columns = 80, 80
-grid = np.random.choice([0, 1], size=(rows, columns), p=[0.5, 0.5])
+        turtle.penup()
+        turtle.goto(x, y)
+        turtle.pendown()
+        turtle.setheading(0)
+        turtle.fillcolor("black")
+        turtle.begin_fill()
+        for _ in range(4):
+            turtle.forward(self.size)
+            turtle.right(90)
+        turtle.end_fill()
 
-# Set up the turtle screen and animation
-animate_life(grid, 10)
+    def update_board(self) -> None:
+        new_grid = np.copy(self.grid)
+        for i in range(self.rows):
+            for j in range(self.columns):
+                new_grid[i, j] = self.update_cell(i, j)
+        self.grid = new_grid
+
+    def update_cell(self, row: int, column: int) -> int:
+        neighbors = (
+            np.sum(
+                self.grid[
+                    max(row - 1, 0) : min(row + 2, self.rows),
+                    max(column - 1, 0) : min(column + 2, self.columns),
+                ]
+            )
+            - self.grid[row, column]
+        )
+        if self.grid[row, column] == 1 and (neighbors < 2 or neighbors > 3):
+            return 0
+        elif self.grid[row, column] == 0 and neighbors == 3:
+            return 1
+        return self.grid[row, column]
+
+    def animate(self) -> None:
+        while True:
+            self.update_board()
+            self.draw_board()
+
+
+def main() -> None:
+    gol = GameOfLife(rows=80, columns=80, size=10)
+    gol.animate()
+
+
+if __name__ == "__main__":
+    main()
