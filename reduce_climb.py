@@ -164,8 +164,8 @@ def choose_next_triangle(
 
         smallest_difference = calculate_difference(input_pixels, output_pixels)
         best_triangle: ColorTriangle | None = None
-        for i in range(4):
-            offset = i * attempts // 4
+        for i in range(8):
+            offset = i * attempts // 8
             try:
                 candidate = _choose_next_triangle(
                     input_pixels,
@@ -173,7 +173,7 @@ def choose_next_triangle(
                     total_triangle_count,
                     current_triangle_count,
                     smallest_difference,  # no difference passing
-                    attempts // 4,
+                    attempts // 8,
                     progress_dict,
                     task_id,
                     offset,
@@ -269,7 +269,7 @@ async def reduce_image_to_output(
     input_path: str,
     output_path: str,
     num_triangles: int = 500,
-    attempts_per_triangle: int = 4000,
+    attempts_per_triangle: int = 8000,
     max_retries: int = 3,
 ) -> None:
     init_images(input_path, worker=False)
