@@ -1,0 +1,4 @@
+packages = ["numpy"]
+[[fetch]]
+from = "/"
+files = ["svg.py", "tortle.py"]
