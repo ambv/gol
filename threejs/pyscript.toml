@@ -1,4 +1,5 @@
 packages = ["numpy"]
+
 [[fetch]]
 from = "/"
-files = ["svg.py", "tortle.py"]
+files = ["libthree.py"]
