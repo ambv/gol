@@ -236,7 +236,6 @@ def save_image_with_triangles(
     pixels: Pixels,
     path: Path | str,
     *,
-    diff_with: Pixels,
     triangles: list[ColorTriangle],
 ) -> None:
     for t in triangles:
@@ -374,14 +373,10 @@ async def reduce_image_to_output(
                 f" (delta {delta_difference}) {maybe_empty}"
             )
             p = path_with_index(output_path, len(triangles))
-            save_image_with_triangles(
-                output_pixels, p, diff_with=input_pixels, triangles=triangles
-            )
+            save_image_with_triangles(output_pixels, p, triangles=triangles)
 
     print(f"Output image saved to {output_path}")
-    save_image_with_triangles(
-        output_pixels, output_path, diff_with=input_pixels, triangles=triangles
-    )
+    save_image_with_triangles(output_pixels, output_path, triangles=triangles)
 
 
 @click.command()
