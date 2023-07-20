@@ -22,10 +22,11 @@ from skimage.draw import polygon, polygon_perimeter  # type: ignore
 import profiling
 
 
-Point = tuple[int, int]
 RGB = tuple[int, int, int]
 Num = TypeVar("Num", int, float)
 Pixels = npt.NDArray[np.uint8]
+Xs = tuple[int, ...]
+Ys = tuple[int, ...]
 
 
 BLACK: RGB = (0, 0, 0)
@@ -72,17 +73,31 @@ print = console.print
 CPU_COUNT: int = os.cpu_count() or 2
 INPUT_PIXELS: ContextVar[Pixels] = ContextVar("input_pixels")
 OUTPUT_PIXELS: ContextVar[Pixels] = ContextVar("output_pixels")
+DIFF: ContextVar[int] = ContextVar("difference")
 
 
 def clamp(num: Num, minimum: Num, maximum: Num) -> Num:
     return min(maximum, max(minimum, num))
 
 
-def calculate_difference(image1: Pixels, image2: Pixels) -> int:
+def calculate_full_difference(image1: Pixels, image2: Pixels) -> int:
     """Calculate the difference between two images."""
     diff = image1 - image2
     squared_diff = np.square(diff)
-    return np.sum(squared_diff)
+    return int(np.sum(squared_diff))
+
+
+def calculate_triangle_difference(
+    total: int, input: Pixels, before: Pixels, after: Pixels, triangle: ColorTriangle
+) -> int:
+    rr: npt.NDArray[np.int64]
+    cc: npt.NDArray[np.int64]
+
+    rr, cc = polygon(triangle.ys, triangle.xs, shape=input.shape[:2])
+    irc = input[rr, cc]
+    diff_before = int(np.square(irc - before[rr, cc]).sum())
+    diff_after = int(np.square(irc - after[rr, cc]).sum())
+    return total - diff_before + diff_after
 
 
 def generate_candidate_triangle(
@@ -159,11 +174,21 @@ def choose_next_triangle(
     with profiling.maybe(progress_dict[task_id].profile_this):
         input_pixels = INPUT_PIXELS.get()
         output_pixels = OUTPUT_PIXELS.get()
+        smallest_difference = DIFF.get()
         if last_triangle is not None:
-            output_pixels = apply_triangle(output_pixels, last_triangle)
+            old_output_pixels = output_pixels
+            new_output_pixels = apply_triangle(output_pixels, last_triangle)
+            output_pixels = new_output_pixels
             OUTPUT_PIXELS.set(output_pixels)
-
-        smallest_difference = calculate_difference(input_pixels, output_pixels)
+            smallest_difference = calculate_triangle_difference(
+                smallest_difference,
+                input_pixels,
+                old_output_pixels,
+                new_output_pixels,
+                last_triangle,
+            )
+            assert smallest_difference == last_triangle.difference
+            DIFF.set(smallest_difference)
         best_triangle: ColorTriangle | None = None
         for i in range(sub_tasks):
             offset = i * attempts // sub_tasks
@@ -173,7 +198,7 @@ def choose_next_triangle(
                     output_pixels,
                     total_triangle_count,
                     current_triangle_count,
-                    smallest_difference,  # no difference passing
+                    smallest_difference,  # note: no in-progress difference passing
                     attempts // sub_tasks,
                     progress_dict,
                     task_id,
@@ -197,7 +222,7 @@ def _choose_next_triangle(
     output_pixels: Pixels,
     total_triangle_count: int,
     current_triangle_count: int,
-    smallest_difference: int,
+    total_difference: int,
     attempts: int,
     progress_dict: ProgressDict,
     task_id: TaskID,
@@ -205,13 +230,21 @@ def _choose_next_triangle(
 ) -> ColorTriangle:
     best_triangle = None
     update = progress_dict[task_id]
-    mutate_at = int(attempts * (0.5 - current_triangle_count / total_triangle_count))
+    mutate_at = int(0.8 * attempts)
     iterations = 0
+    full_difference_old = calculate_full_difference(input_pixels, output_pixels)
+    assert total_difference == full_difference_old
+    smallest_difference = total_difference
+    seen: set[tuple[Xs, Ys]] = set()
     while iterations < attempts:
         try:
             candidate_triangle = generate_candidate_triangle(
                 input_pixels, mutate=best_triangle if iterations >= mutate_at else None
             )
+            coords = tuple(candidate_triangle.xs), tuple(candidate_triangle.ys)
+            if coords in seen:
+                continue
+            seen.add(coords)
         except LookupError:
             continue  # triangle entirely out of bounds
 
@@ -219,7 +252,13 @@ def _choose_next_triangle(
         update.completed = offset + iterations
 
         new_output_pixels = apply_triangle(output_pixels, candidate_triangle)
-        new_difference = calculate_difference(input_pixels, new_output_pixels)
+        new_difference = calculate_triangle_difference(
+            total_difference,
+            input_pixels,
+            output_pixels,
+            new_output_pixels,
+            candidate_triangle,
+        )
         if new_difference < smallest_difference:
             candidate_triangle.difference = new_difference
             smallest_difference = new_difference
@@ -255,31 +294,33 @@ def init_images(input_path: str, worker: bool) -> None:
     input_image = Image.open(input_path)
     width, height = input_image.size
     L = Image.LANCZOS
-    if worker:
-        input_image = input_image.resize((width // 2, height // 2), resample=L)
-        output_image = ImageOps.invert(input_image)
-    else:
+    input_image_smol = input_image.resize((width // 2, height // 2), resample=L)
+    output_image_inv = ImageOps.invert(input_image_smol)
+    input_pixels = np.array(input_image_smol)
+    output_pixels = np.array(output_image_inv)
+    DIFF.set(calculate_full_difference(input_pixels, output_pixels))
+    if not worker:
         average_color: RGB = input_image.resize((1, 1), resample=L).getpixel((0, 0))  # type: ignore
         output_image = Image.new("RGB", (width, height), average_color)  # type: ignore
-    INPUT_PIXELS.set(np.array(input_image))
-    OUTPUT_PIXELS.set(np.array(output_image))
+        input_pixels = np.array(input_image)
+        output_pixels = np.array(output_image)
+    INPUT_PIXELS.set(input_pixels)
+    OUTPUT_PIXELS.set(output_pixels)
 
 
 async def reduce_image_to_output(
     input_path: str,
     output_path: str,
     num_triangles: int = 500,
-    attempts_per_triangle: int = 8000,
-    sub_tasks_per_worker: int = 8,
+    attempts_per_triangle: int = 5000,
+    sub_tasks_per_worker: int = 4,
     max_retries: int = 3,
 ) -> None:
     init_images(input_path, worker=False)
     triangles: list[ColorTriangle] = []
     loop = asyncio.get_running_loop()
 
-    input_pixels = INPUT_PIXELS.get()
     output_pixels = OUTPUT_PIXELS.get()
-    current_difference = 0
 
     with (
         multiprocessing.Manager() as manager,
@@ -288,7 +329,7 @@ async def reduce_image_to_output(
             initargs=(input_path, True),
             max_workers=CPU_COUNT,
         ) as pool,
-        Progress(console=console) as progress,
+        Progress(console=console, auto_refresh=True) as progress,
     ):
         _progress = cast(ProgressDict, manager.dict())
         _tasks: list[TaskID] = []
@@ -298,6 +339,7 @@ async def reduce_image_to_output(
                 completed=0, total=attempts_per_triangle, profile_this=False  # i == 0
             )
 
+        current_difference = DIFF.get()
         retries = 0
         overall = progress.add_task(
             "Generating...", total=num_triangles * CPU_COUNT * attempts_per_triangle
@@ -385,19 +427,9 @@ async def reduce_image_to_output(
 @click.command()
 @click.argument("input_path")
 @click.argument("output_path")
-def diff_images(input_path: str, output_path: str) -> None:
-    input_pixels = iio.imread(input_path)
-    output_pixels = iio.imread(output_path)
-    print(calculate_difference(input_pixels, output_pixels))
-
-
-@click.command()
-@click.argument("input_path")
-@click.argument("output_path")
 def reduce_main(input_path: str, output_path: str) -> None:
     asyncio.run(reduce_image_to_output(input_path, output_path))
 
 
 if __name__ == "__main__":
     reduce_main()
-    # diff_images()
