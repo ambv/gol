@@ -152,6 +152,7 @@ def choose_next_triangle(
     current_triangle_count: int,
     last_triangle: ColorTriangle | None,
     attempts: int,
+    sub_tasks: int,
     progress_dict: ProgressDict,
     task_id: TaskID,
 ) -> ColorTriangle:
@@ -164,8 +165,8 @@ def choose_next_triangle(
 
         smallest_difference = calculate_difference(input_pixels, output_pixels)
         best_triangle: ColorTriangle | None = None
-        for i in range(8):
-            offset = i * attempts // 8
+        for i in range(sub_tasks):
+            offset = i * attempts // sub_tasks
             try:
                 candidate = _choose_next_triangle(
                     input_pixels,
@@ -173,7 +174,7 @@ def choose_next_triangle(
                     total_triangle_count,
                     current_triangle_count,
                     smallest_difference,  # no difference passing
-                    attempts // 8,
+                    attempts // sub_tasks,
                     progress_dict,
                     task_id,
                     offset,
@@ -269,6 +270,7 @@ async def reduce_image_to_output(
     output_path: str,
     num_triangles: int = 500,
     attempts_per_triangle: int = 8000,
+    sub_tasks_per_worker: int = 8,
     max_retries: int = 3,
 ) -> None:
     init_images(input_path, worker=False)
@@ -310,6 +312,7 @@ async def reduce_image_to_output(
                     len(triangles),
                     last_triangle,
                     attempts_per_triangle,
+                    sub_tasks_per_worker,
                     _progress,
                     _tasks[i],
                 )
